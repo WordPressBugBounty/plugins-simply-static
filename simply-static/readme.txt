@@ -4,7 +4,7 @@ Tags: static site generator, performance, security, jamstack
 Requires at least: 6.3
 Tested up to: 6.6
 Requires PHP: 7.4
-Stable tag: 3.2.2
+Stable tag: 3.2.3
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -246,6 +246,19 @@ Simply Static creates a static copy of your WordPress site that is intended to b
 3. Diagnostics
 
 == Changelog ==
+
+= 3.2.3 =
+
+* removed processing_pages_message method
+* added the ability to include files without a file extension (_headers, _redirects..)
+* added UI to reset database table
+* included diagnostics check for no-index setting
+* included diagnostics check for Basic Auth without proper configuration in settings
+* tweak to avoid duplicate notes in export log
+* renamed Simply Static (Admin Bar) to Admin Bar (Core)
+* renamed Environments to Environment (Core)
+* simplified http_request_args filter implementation
+* added notice to upgrade both (pro and free) because of removing deprecated methods
 
 = 3.2.2 =
 
