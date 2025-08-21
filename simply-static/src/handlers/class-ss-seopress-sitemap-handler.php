@@ -2,13 +2,9 @@
 
 namespace Simply_Static;
 
-use RankMath\Helper;
-use RankMath\Traits\Hooker;
 use Simply_Static\Options;
 
-class Rank_Math_Sitemap_Handler extends Page_Handler {
-
-	use Hooker;
+class SEOPress_Sitemap_Handler extends Page_Handler {
 
 	/**
 	 * Run hooks on page request.
@@ -21,20 +17,7 @@ class Rank_Math_Sitemap_Handler extends Page_Handler {
 		parent::run_hooks();
 
 		// Filter XSL.
-		foreach ( Helper::get_accessible_taxonomies() as $taxonomy ) {
-			if ( 'post_format' === $taxonomy->name ) {
-				continue;
-			}
-			\add_filter( 'rank_math/sitemap/' . $taxonomy->name . '_stylesheet_url', [ $this, 'stylesheet_url' ] );
-		}
-
-		foreach ( Helper::get_accessible_post_types() as $post_type ) {
-			$object = get_post_type_object( $post_type );
-			\add_filter( 'rank_math/sitemap/' . $object->name . '_stylesheet_url', [ $this, 'stylesheet_url' ] );
-		}
-		// Main: 1_stylesheet_Url.
-		\add_filter( 'rank_math/sitemap/1_stylesheet_url', [ $this, 'stylesheet_url' ] );
-		\add_filter( 'rank_math/sitemap/enable_caching', '__return_false' );
+		add_filter( 'seopress_sitemaps_stylesheet_url', [ $this, 'stylesheet_url' ] );
 	}
 
 	/**
@@ -50,40 +33,16 @@ class Rank_Math_Sitemap_Handler extends Page_Handler {
 	}
 
 	/**
-	 * Add file after generation.
+	 * Add file to destination directory.
 	 *
-	 * @param string $destination_dir given destination directory.
+	 * @param string $destination_dir given destination dir.
 	 *
 	 * @return void
 	 */
 	public function after_file_fetch( $destination_dir ) {
         $this->save_xsl( $destination_dir );
-        $this->rename_sitemap( $destination_dir );
         $this->fix_sitemap_xsl_references( $destination_dir );
 	}
-
-    /**
-     * Rename sitemap to sitemap.xml
-     *
-     * @param string $destination_dir Destination directory.
-     * @return void
-     */
-    protected function rename_sitemap( $destination_dir ) {
-        $sitemap_xml = Util::combine_path( $destination_dir, '/sitemap_index.xml' );
-        if ( ! file_exists( $sitemap_xml ) ) {
-            return;
-        }
-
-        $new_sitemap_xml = Util::combine_path( $destination_dir, '/sitemap.xml' );
-
-        $copy = copy( $sitemap_xml, $new_sitemap_xml );
-        if ( $copy === false ) {
-            Util::debug_log( 'Cannot copy ' . $sitemap_xml . ' to ' . $new_sitemap_xml );
-        } else {
-
-            Util::debug_log( 'Copied ' . $sitemap_xml . ' to ' . $new_sitemap_xml );
-        }
-    }
 
     /**
      * Save XSL.
@@ -118,8 +77,8 @@ class Rank_Math_Sitemap_Handler extends Page_Handler {
         }
 
         // Also copy to any potential path referenced in the sitemap XML
-        // For RankMath, we don't know the exact path, so we'll create a common location
-        $plugin_dir = Util::combine_path( $destination_dir, '/wp-content/plugins/seo-by-rank-math/assets' );
+        // For SEOPress, we'll create a common location
+        $plugin_dir = Util::combine_path( $destination_dir, '/wp-content/plugins/wp-seopress/inc/functions/sitemap' );
 
         // Create directory structure if it doesn't exist
         if ( ! file_exists( $plugin_dir ) ) {
@@ -138,23 +97,38 @@ class Rank_Math_Sitemap_Handler extends Page_Handler {
         }
     }
 
-	/**
-	 * Generate XSL
-	 *
-	 * Code copied from RankMath \RankMath\Sitemap\Stylesheet class.
-	 *
-	 * @return void
-	 * @see \RankMath\Sitemap\Stylesheet
-	 */
-	public function generate_xsl() {
-		/* translators: 1. separator, 2. blogname */
-		$title = sprintf( __( 'XML Sitemap %1$s %2$s', 'rank-math' ), '-', get_bloginfo( 'name', 'display' ) );
-
-		/* translators: 1. separator, 2. blogname */
-		$kml_title = sprintf( __( 'Locations Sitemap %1$s %2$s', 'rank-math' ), '-', get_bloginfo( 'name', 'display' ) );
-
-		require_once RANK_MATH_PATH . 'includes/modules/sitemap/sitemap-xsl.php';
-	}
+    /**
+     * Generate XSL
+     *
+     * @return void
+     */
+    public function generate_xsl() {
+        if ( function_exists( 'seopress_xml_sitemap_index_xsl' ) ) {
+            seopress_xml_sitemap_index_xsl();
+        } else {
+            // Fallback to a basic XSL if the function doesn't exist
+            echo '<?xml version="1.0" encoding="UTF-8"?>';
+            echo '<xsl:stylesheet version="2.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:sitemap="http://www.sitemaps.org/schemas/sitemap/0.9">';
+            echo '<xsl:output method="html" encoding="UTF-8" indent="yes"/>';
+            echo '<xsl:template match="/">';
+            echo '<html><head><title>XML Sitemap</title>';
+            echo '<style>body{font-family:Arial,sans-serif;font-size:14px;color:#333}h1{font-size:24px;font-weight:normal;margin:10px 0}table{border-collapse:collapse;width:100%;margin:20px 0}th,td{padding:10px;text-align:left}th{background-color:#f2f2f2}tr:nth-child(even){background-color:#f9f9f9}a{color:#337ab7;text-decoration:none}a:hover{text-decoration:underline}</style>';
+            echo '</head><body>';
+            echo '<h1>XML Sitemap</h1>';
+            echo '<table>';
+            echo '<tr><th>URL</th><th>Last Modified</th></tr>';
+            echo '<xsl:for-each select="sitemap:urlset/sitemap:url">';
+            echo '<tr>';
+            echo '<td><a href="{sitemap:loc}"><xsl:value-of select="sitemap:loc"/></a></td>';
+            echo '<td><xsl:value-of select="sitemap:lastmod"/></td>';
+            echo '</tr>';
+            echo '</xsl:for-each>';
+            echo '</table>';
+            echo '</body></html>';
+            echo '</xsl:template>';
+            echo '</xsl:stylesheet>';
+        }
+    }
 
     /**
      * Fix XSL references in sitemap XML files
@@ -165,8 +139,7 @@ class Rank_Math_Sitemap_Handler extends Page_Handler {
     protected function fix_sitemap_xsl_references( $destination_dir ) {
         // List of sitemap files to check
         $sitemap_files = [
-            Util::combine_path( $destination_dir, '/sitemap.xml' ),
-            Util::combine_path( $destination_dir, '/sitemap_index.xml' ),
+            Util::combine_path( $destination_dir, '/sitemaps.xml' ),
             // Add other sitemap files if needed
         ];
 
