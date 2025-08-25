@@ -24,7 +24,7 @@ class Theme_Assets_Crawler extends Crawler {
 	 * Constructor
 	 */
 	public function __construct() {
-		$this->name = __( 'Theme Assets', 'simply-static' );
+		$this->name        = __( 'Theme Assets', 'simply-static' );
 		$this->description = __( 'Detects URLs for assets (CSS, JS, images) used by the active theme.', 'simply-static' );
 	}
 

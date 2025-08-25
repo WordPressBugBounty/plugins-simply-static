@@ -111,6 +111,7 @@ class Plugin_Assets_Crawler extends Crawler {
 		// Check if directory exists
 		if ( ! is_dir( $dir ) ) {
 			\Simply_Static\Util::debug_log( "Directory does not exist: $dir" );
+
 			return $urls;
 		}
 
@@ -122,10 +123,10 @@ class Plugin_Assets_Crawler extends Crawler {
 			);
 
 			// Process files in batches to prevent memory issues
-			$batch_size = apply_filters( 'simply_static_plugin_assets_batch_size', 500 );
-			$file_count = 0;
+			$batch_size  = apply_filters( 'simply_static_plugin_assets_batch_size', 500 );
+			$file_count  = 0;
 			$batch_count = 0;
-			$file_batch = [];
+			$file_batch  = [];
 
 			foreach ( $iterator as $file ) {
 				// Skip directories
@@ -134,19 +135,19 @@ class Plugin_Assets_Crawler extends Crawler {
 				}
 
 				$file_batch[] = $file;
-				$file_count++;
+				$file_count ++;
 
 				// Process batch when it reaches the batch size
 				if ( $file_count % $batch_size === 0 ) {
-					$batch_count++;
-					$urls = array_merge( $urls, $this->process_file_batch( $file_batch, $dir, $url_base, $skip_dirs, $asset_extensions ) );
+					$batch_count ++;
+					$urls       = array_merge( $urls, $this->process_file_batch( $file_batch, $dir, $url_base, $skip_dirs, $asset_extensions ) );
 					$file_batch = []; // Reset batch
 				}
 			}
 
 			// Process any remaining files
 			if ( ! empty( $file_batch ) ) {
-				$batch_count++;
+				$batch_count ++;
 				$urls = array_merge( $urls, $this->process_file_batch( $file_batch, $dir, $url_base, $skip_dirs, $asset_extensions ) );
 			}
 
@@ -204,8 +205,7 @@ class Plugin_Assets_Crawler extends Crawler {
 				// Convert the file path to a URL
 				$relative_url = str_replace( '\\', '/', $relative_path );
 				$url          = $url_base . $relative_url;
-
-				$urls[] = $url;
+				$urls[]       = $url;
 			}
 		}
 
