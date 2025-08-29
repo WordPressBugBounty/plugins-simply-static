@@ -38,6 +38,9 @@ class Admin_Settings {
 	public function __construct() {
 		add_action( 'admin_menu', array( $this, 'add_menu' ) );
 		add_action( 'rest_api_init', array( $this, 'rest_api_init' ) );
+		// Prevent WP core from altering the admin URL with history.replaceState on Simply Static pages.
+		// This avoids a SecurityError when Basic Auth credentials are present in the URL.
+		add_action( 'admin_head', array( $this, 'maybe_disable_admin_canonical' ), 1 );
 
 		$this->failed_tests = intval( get_transient( 'simply_static_failed_tests' ) );
 
@@ -131,6 +134,23 @@ class Admin_Settings {
                 </script>
 				<?php
 			} );
+		}
+	}
+
+	public function maybe_disable_admin_canonical() {
+		// Only run in admin and on Simply Static pages.
+		if ( ! is_admin() ) {
+			return;
+		}
+		$page = isset( $_GET['page'] ) ? sanitize_text_field( wp_unslash( $_GET['page'] ) ) : '';
+		$our_pages = array(
+			'simply-static-generate',
+			'simply-static-settings',
+			'simply-static-diagnostics',
+		);
+		if ( in_array( $page, $our_pages, true ) ) {
+			// Remove the core canonical URL handler that uses history.replaceState on admin pages.
+			remove_action( 'admin_head', 'wp_admin_canonical_url' );
 		}
 	}
 
@@ -523,15 +543,20 @@ class Admin_Settings {
 	 * @return false|string
 	 */
 	public function check_system_status_passed() {
-		$diagnostics = new Diagnostic();
-		$passed      = 'yes';
-		$checks      = $diagnostics->get_checks();
+		$passed = 'yes';
+
+		// Prefer cached checks to avoid heavy recomputation on frequent requests.
+		$checks = get_transient( 'simply_static_checks' );
+		if ( false === $checks || empty( $checks ) ) {
+			$diagnostics = new Diagnostic();
+			$checks      = $diagnostics->get_checks();
+		}
 
 		foreach ( $checks as $topics ) {
 			foreach ( $topics as $check ) {
-				if ( ! $check['test'] ) {
+				if ( isset( $check['test'] ) && ! $check['test'] ) {
 					$passed = 'no';
-					break;
+					break 2;
 				}
 			}
 		}
@@ -990,8 +1015,9 @@ class Admin_Settings {
 	 *
 	 * @return false|string
 	 */
-	public function cancel_export() {
+	public function cancel_export( $request ) {
 		Util::debug_log( "Received request to cancel static archive generation" );
+		$params  = $request->get_params();
 		$blog_id = ! empty( $params['blog_id'] ) ? $params['blog_id'] : 0;
 
 		do_action( 'ss_before_perform_archive_action', $blog_id, 'cancel', Plugin::instance()->get_archive_creation_job() );
@@ -1025,8 +1051,9 @@ class Admin_Settings {
 	 *
 	 * @return false|string
 	 */
-	public function pause_export() {
+	public function pause_export( $request ) {
 		Util::debug_log( "Received request to pause static archive generation" );
+		$params  = $request->get_params();
 		$blog_id = ! empty( $params['blog_id'] ) ? $params['blog_id'] : 0;
 
 		do_action( 'ss_before_perform_archive_action', $blog_id, 'pause', Plugin::instance()->get_archive_creation_job() );
@@ -1043,8 +1070,9 @@ class Admin_Settings {
 	 *
 	 * @return false|string
 	 */
-	public function resume_export() {
+	public function resume_export( $request ) {
 		Util::debug_log( "Received request to resume static archive generation" );
+		$params  = $request->get_params();
 		$blog_id = ! empty( $params['blog_id'] ) ? $params['blog_id'] : 0;
 
 		do_action( 'ss_before_perform_archive_action', $blog_id, 'resume', Plugin::instance()->get_archive_creation_job() );
