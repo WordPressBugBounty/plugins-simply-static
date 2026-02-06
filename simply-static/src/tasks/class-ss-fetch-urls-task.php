@@ -7,6 +7,10 @@ namespace Simply_Static;
  */
 class Fetch_Urls_Task extends Task {
 
+	use canProcessPages {
+		get_generate_type as parent_get_generate_type;
+	}
+
 	/**
 	 * Task name.
 	 *
@@ -36,14 +40,104 @@ class Fetch_Urls_Task extends Task {
 
 		$this->archive_dir        = $this->options->get_archive_dir();
 		$this->archive_start_time = $this->options->get( 'archive_start_time' );
+		$this->processing_column  = 'last_checked_at';
+		$this->needs_file_path    = false;
+	}
+
+	protected function process_page( $static_page ) {
+		Util::debug_log( "URL: " . $static_page->url );
+
+		$excludable = apply_filters( 'ss_find_excludable', $this->find_excludable( $static_page ), $static_page );
+		if ( $excludable !== false ) {
+			$save_file   = false;
+			$follow_urls = false;
+			Util::debug_log( "Excludable found: URL: " . $static_page->url );
+		} else {
+			$save_file   = true;
+			$follow_urls = true;
+			Util::debug_log( "URL is not being excluded" );
+		}
+
+		// If we're not saving a copy of the page or following URLs on that
+		// page, then we don't need to bother fetching it.
+		if ( $save_file === false && $follow_urls === false ) {
+			Util::debug_log( "Skipping URL because it is no-save and no-follow" );
+			$static_page->last_checked_at = Util::formatted_datetime();
+			$static_page->set_status_message( __( "Do not save or follow", 'simply-static' ) );
+			$static_page->save();
+			return;
+		} else {
+			$success = Url_Fetcher::instance()->fetch( $static_page );
+		}
+
+		if ( ! $success ) {
+			return;
+		}
+
+		// Not found? It's maybe a redirection page. Let's try it without our param.
+		if ( $static_page->http_status_code === 404 ) {
+			$success = Url_Fetcher::instance()->fetch( $static_page, false );
+
+			if ( ! $success ) {
+				return;
+			}
+		}
+
+		// If we get a 30x redirect...
+		if ( in_array( $static_page->http_status_code, array( 301, 302, 303, 307, 308 ) ) ) {
+			$this->handle_30x_redirect( $static_page, $save_file, $follow_urls );
+			return;
+		}
+
+		// Not a 200 for the response code? Move on.
+		if ( $static_page->http_status_code != 200 ) {
+			return;
+		}
+
+		$this->handle_200_response( $static_page, $save_file, $follow_urls );
+
+		do_action(
+			'ss_after_setup_static_page',
+			$static_page,
+			$this
+		);
+
 	}
 
 	/**
 	 * Fetch and save pages for the static archive
 	 *
-	 * @return boolean|WP_Error true if done, false if not done, WP_Error if error.
+	 * @return boolean|\WP_Error true if done, false if not done, WP_Error if error.
+	 * @throws \Exception
 	 */
 	public function perform() {
+		$done = $this->process_pages();
+
+		if ( $done ) {
+			// Last check.
+			$remaining_pages = $this->get_pages_to_process();
+
+			if ( count( $remaining_pages ) > 0 ) {
+				$done = false;
+			}
+		}
+
+		// If we've processed all pages for this export, signal completion of this task.
+		if ( $done ) {
+			do_action( 'ss_finished_fetching_pages' );
+		}
+
+		return $done;
+	}
+
+	/**
+	 * @deprecated Using trait now to process pages.
+	 * @return bool
+	 * @depends Use perform instead. Will be deleted in future versions.
+	 *
+	 * @throws Pause_Exception
+	 */
+	public function old_perform() {
 		$batch_size = apply_filters( 'simply_static_fetch_urls_batch_size', 50 );
 
 		$static_pages = apply_filters(
@@ -55,7 +149,8 @@ class Fetch_Urls_Task extends Task {
 			$this->archive_start_time
 		);
 
-		$pages_remaining = apply_filters(
+		// Compute remaining and total using the dedicated filters so Single/Build exports report correctly
+		$pages_remaining = (int) apply_filters(
 			'ss_remaining_pages',
 			Page::query()
 			    ->where( 'last_checked_at < ? OR last_checked_at IS NULL', $this->archive_start_time )
@@ -63,15 +158,22 @@ class Fetch_Urls_Task extends Task {
 			$this->archive_start_time
 		);
 
-		$total_pages = apply_filters( 'ss_total_pages', Page::query()->count() );
+		$total_pages = (int) apply_filters( 'ss_total_pages', Page::query()->count() );
 
+		// Note: We will recalculate these values again after processing this batch so the
+		// status message always reflects the latest progress.
 		$pages_processed = $total_pages - $pages_remaining;
 		Util::debug_log( "Total pages: " . $total_pages . '; Pages remaining: ' . $pages_remaining );
+
+		// Track remaining pages locally so we can update progress accurately without extra DB queries.
+		$remaining_counter = (int) $pages_remaining;
 
 		while ( $static_page = array_shift( $static_pages ) ) {
 			$this->check_if_running();
 			Util::debug_log( "URL: " . $static_page->url );
-			$this->save_pages_status( count( $static_pages ) + 1, intval( $total_pages ) );
+			//$this->save_pages_status( $remaining_counter, (int) $total_pages );
+			// Decrement after scheduling processing of this page.
+			$remaining_counter = max( 0, $remaining_counter - 1 );
 
 			$excludable = apply_filters( 'ss_find_excludable', $this->find_excludable( $static_page ), $static_page );
 			if ( $excludable !== false ) {
@@ -126,10 +228,21 @@ class Fetch_Urls_Task extends Task {
 
 		}
 
+		// Recalculate progress after processing this batch to avoid stale counters.
+		$pages_remaining = (int) apply_filters(
+			'ss_remaining_pages',
+			Page::query()
+		        ->where( 'last_checked_at < ? OR last_checked_at IS NULL', $this->archive_start_time )
+		        ->count(),
+			$this->archive_start_time
+		);
+		$total_pages = (int) apply_filters( 'ss_total_pages', Page::query()->count() );
+		$pages_processed = $total_pages - $pages_remaining;
+
 		$message = sprintf( __( "Fetched %d of %d pages/files", 'simply-static' ), $pages_processed, $total_pages );
 		$this->save_status_message( $message );
 
-		// if we haven't processed any additional pages, we're done.
+		// If we've processed all pages for this export, signal completion of this task.
 		if ( $pages_remaining == 0 ) {
 			do_action( 'ss_finished_fetching_pages' );
 		}
@@ -189,7 +302,7 @@ class Fetch_Urls_Task extends Task {
 	/**
 	 * Process the response to a 30x redirection
 	 *
-	 * @param Simply_Static\Page $static_page Record to update
+	 * @param \Simply_Static\Page $static_page Record to update
 	 * @param boolean $save_file Save a static copy of the page?
 	 * @param boolean $follow_urls Save redirect URL to database?
 	 *
@@ -248,7 +361,10 @@ class Fetch_Urls_Task extends Task {
 						$static_page->set_status_message( __( "Do not follow", 'simply-static' ) );
 					}
 					// and update the URL
-					$redirect_url = str_replace( $origin_url, $destination_url, $redirect_url );
+					// Replace origin host (any scheme) with the configured destination URL to ensure
+					// redirects point to the static site domain even when schemes differ (http/https).
+					$pattern      = '/^(https?:)?\/\/' . addcslashes( Util::origin_host(), '/' ) . '/i';
+					$redirect_url = preg_replace( $pattern, $destination_url, $redirect_url );
 
 				}
 
@@ -291,12 +407,16 @@ class Fetch_Urls_Task extends Task {
 	 *
 	 * @return bool
 	 */
-	public function find_excludable( $static_page ) {
+ public function find_excludable( $static_page ) {
+ 		// Delegate exclusion decision to central utility for consistency with crawlers
+ 		if ( \Simply_Static\Util::is_url_excluded( $static_page->url ) ) {
+ 			return true;
+ 		}
 		$excluded = array( '.php' );
 		$url = $static_page->url;
 
-		// Exclude debug files (.log, .txt) but not robots.txt
-		if ( preg_match( '/\.(log|txt)$/i', $url ) && strpos( $url, 'debug' ) !== false && strpos( $url, 'robots.txt' ) === false ) {
+		// Exclude debug files (.log, .txt) but not robots.txt, llms.txt, _redirects, or _headers
+		if ( preg_match( '/\.(log|txt)$/i', $url ) && strpos( $url, 'debug' ) !== false && strpos( $url, 'robots.txt' ) === false && strpos( $url, 'llms.txt' ) === false && strpos( $url, '_redirects' ) === false && strpos( $url, '_headers' ) === false ) {
 			return true;
 		}
 
@@ -314,11 +434,16 @@ class Fetch_Urls_Task extends Task {
 		}
 
 		if ( ! empty( $this->options->get( 'urls_to_exclude' ) ) ) {
-			$excluded_by_option = explode( "\n", $this->options->get( 'urls_to_exclude' ) );
+			if ( is_array( $this->options->get( 'urls_to_exclude' ) ) ) {
+				$excluded_by_option = wp_list_pluck( $this->options->get( 'urls_to_exclude' ), 'url' );
+			} else {
+				$excluded_by_option = explode( "\n", $this->options->get( 'urls_to_exclude' ) );
+			}
 
 			if ( is_array( $excluded_by_option ) ) {
 				$excluded = array_merge( $excluded, $excluded_by_option );
 			}
+
 		}
 
 		if ( apply_filters( 'simply_static_exclude_temp_dir', true ) ) {
@@ -369,6 +494,12 @@ class Fetch_Urls_Task extends Task {
 			return;
 		}
 
+		// Do not add excluded URLs to the database at all
+		if ( Util::is_url_excluded( $child_url ) ) {
+			Util::debug_log( sprintf( 'Skipping excluded child URL: %s', $child_url ) );
+			return;
+		}
+
 		$child_static_page = Page::query()->find_or_create_by( 'url', $child_url );
 		if ( $child_static_page->found_on_id === null || $child_static_page->updated_at < $this->archive_start_time ) {
 			$child_static_page->found_on_id = $static_page->id;
@@ -390,7 +521,7 @@ class Fetch_Urls_Task extends Task {
 	/**
 	 * Save the contents of a page to a file in our archive directory
 	 *
-	 * @param Simply_Static\Page $static_page The Simply_Static\Page record.
+	 * @param \Simply_Static\Page $static_page The Simply_Static\Page record.
 	 * @param string $content The content of the page we want to save.
 	 *
 	 * @return string|null                The file path of the saved file.
@@ -410,5 +541,48 @@ class Fetch_Urls_Task extends Task {
 		} else {
 			return null;
 		}
+	}
+
+	/**
+	 * Message to set when processed pages.
+	 *
+	 * @param integer $processed Number of pages processed.
+	 * @param integer $total Number of total pages to process.
+	 *
+	 * @return string
+	 */
+	protected function processed_pages_message( $processed, $total ) {
+		return sprintf( __( "Fetched %d of %d pages/files", 'simply-static' ), $processed, $total );
+	}
+
+	/**
+	 * Get generation type (export, update, build)
+	 *
+	 * @return mixed|string|null
+	 */
+	public function get_generate_type() {
+		$type = $this->parent_get_generate_type();
+
+		// Even on update, fetch should always get all pages.
+		if ( 'update' === $type ) {
+			$type = 'export';
+		}
+
+		return $type;
+	}
+
+	/**
+	 * Get total number of pages to process.
+	 * For this task, we don't use the cached values.
+	 *
+	 * @param boolean $cached Whether to use cached values.
+	 *
+	 * @return int|null
+	 * @throws \Exception
+	 */
+	public function get_total_pages( $cached = true ) {
+
+		return $this->get_total_pages_sql();
+
 	}
 }

@@ -5,6 +5,7 @@ return apply_filters( 'ss_compatible_plugins', array(
 	array( 'slug' => 'all-in-one-seo-pack' ),
 	array( 'slug' => 'seo-by-rank-math' ),
 	array( 'slug' => 'wp-seopress' ),
+	array( 'slug' => 'nsg-seo-generator' ),
 	array( 'slug' => 'google-sitemap-generator' ),
 	array( 'slug' => 'elementor' ),
 	array( 'slug' => 'elementor-pro' ),
@@ -109,5 +110,7 @@ return apply_filters( 'ss_compatible_plugins', array(
 	array( 'slug' => 'speculation-rules' ),
 	array( 'slug' => 'view-transitions' ),
 	array( 'slug' => 'nocache-bfcache' ),
+	array( 'slug' => 'advanced-media-offloader' ),
+	array( 'slug' => 'search-with-typesense' )
 ) );
 
