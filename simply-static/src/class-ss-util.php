@@ -416,6 +416,11 @@ class Util {
 	 * @return bool
 	 */
 	public static function is_url_excluded( string $url ): bool {
+		// Never exclude core WordPress or Simply Static assets
+		if ( self::is_core_include_asset( $url ) ) {
+			return false;
+		}
+
 		$excluded = array( '.php' );
 		$opts = Options::instance();
 
@@ -889,7 +894,15 @@ class Util {
 	 * @return boolean      true if URL is local, false otherwise
 	 */
 	public static function is_local_url( $url ) {
-		return apply_filters( 'ss_is_local_url', ( stripos( self::strip_protocol_from_url( $url ), self::origin_host() ) === 0 ) );
+		$url_host = self::strip_protocol_from_url( self::remove_params_and_fragment( $url ) );
+		// Strip port if present
+		$url_host = preg_replace( '/:\d+/', '', $url_host );
+
+		$origin_host = self::origin_host();
+		// Strip port if present
+		$origin_host = preg_replace( '/:\d+/', '', $origin_host );
+
+		return apply_filters( 'ss_is_local_url', ( stripos( $url_host, $origin_host ) === 0 ) );
 	}
 
 	/**
@@ -916,6 +929,7 @@ class Util {
 	public static function get_path_from_local_url( $url ) {
 		$url = self::strip_protocol_from_url( $url );
 		$url = str_replace( self::origin_host(), '', $url );
+		$url = str_replace( preg_replace( '/:\d+/', '', self::origin_host() ), '', $url );
 
 		return $url;
 	}
@@ -984,6 +998,57 @@ class Util {
 	 */
 	public static function formatted_datetime() {
 		return current_time( 'Y-m-d H:i:s' );
+	}
+
+	/**
+	 * Sanitize filename to remove problematic Unicode characters
+	 *
+	 * @param string $filename Filename to sanitize.
+	 * @return string Sanitized filename.
+	 */
+	public static function sanitize_filename( $filename ) {
+		if ( $filename === '__qs' ) return $filename;
+
+		// Bypass for safe ASCII (alphanumerics, hyphens, underscores, dots)
+		if ( preg_match( '/^[a-zA-Z0-9\-_.]+$/', $filename ) && substr( $filename, -1 ) !== '.' ) {
+			return $filename;
+		}
+
+		$filename = html_entity_decode( $filename, ENT_QUOTES, 'UTF-8' );
+		if ( function_exists( 'remove_accents' ) ) {
+			$filename = remove_accents( $filename );
+		}
+
+		// Remove bullet points, ellipses, copyright, and private use characters
+		$filename = preg_replace( '/[\x{2022}\x{2026}\x{00A9}\x{E000}-\x{F8FF}]/u', '-', $filename );
+
+		return sanitize_file_name( $filename );
+	}
+
+	/**
+	 * Sanitize each segment of a path.
+	 *
+	 * @param string $path Path to sanitize.
+	 * @return string Sanitized path.
+	 */
+	public static function sanitize_path( $path ) {
+		$segments           = explode( '/', $path );
+		$sanitized_segments = array_map( [ self::class, 'sanitize_filename' ], $segments );
+
+		return implode( '/', $sanitized_segments );
+	}
+
+	/**
+	 * Sanitize a local path (sans host) while preserving query and fragment.
+	 *
+	 * @param string $path The path to sanitize.
+	 * @return string Sanitized path with original query/fragment.
+	 */
+	public static function sanitize_local_path( $path ) {
+		$clean_path     = self::remove_params_and_fragment( $path );
+		$query_fragment = substr( $path, strlen( $clean_path ) );
+
+		return self::sanitize_path( (string) urldecode( $clean_path ) ) . $query_fragment;
 	}
 
 	/**
@@ -1063,6 +1128,20 @@ class Util {
 		}
 
 		return in_array( $path_info['extension'], $allowed_asset_extensions, true );
+	}
+
+	/**
+	 * Check if a URL belongs to core WordPress or Simply Static assets that should never be excluded.
+	 *
+	 * @param string $url The URL to check.
+	 * @return bool True if it's a core include asset.
+	 */
+	public static function is_core_include_asset( string $url ): bool {
+		$core_paths = [ includes_url(), plugins_url() . '/simply-static/', plugins_url() . '/simply-static-pro/' ];
+		foreach ( $core_paths as $path ) {
+			if ( strpos( $url, $path ) !== false ) return self::is_local_asset_url( $url );
+		}
+		return false;
 	}
 
 	/**

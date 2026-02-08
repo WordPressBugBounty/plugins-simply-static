@@ -77,12 +77,16 @@ class Theme_Assets_Crawler extends Crawler {
 			'gif',
 			'svg',
 			'webp',
+			'avif',
+			'heic',
+			'tiff',
 			'woff',
 			'woff2',
 			'ttf',
 			'eot',
 			'otf',
-			'ico'
+			'ico',
+			'json'
 		];
 		$skip_dirs  = apply_filters( 'ss_skip_crawl_theme_directories', [
 			'.git',
@@ -219,12 +223,16 @@ class Theme_Assets_Crawler extends Crawler {
 			'gif',
 			'svg',
 			'webp',
+			'avif',
+			'heic',
+			'tiff',
 			'woff',
 			'woff2',
 			'ttf',
 			'eot',
 			'otf',
 			'ico',
+			'json',
 		];
 
 		// Skip these directories
