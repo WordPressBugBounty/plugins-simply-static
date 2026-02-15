@@ -927,11 +927,38 @@ class Util {
 	 * @return string       URL sans protocol/host
 	 */
 	public static function get_path_from_local_url( $url ) {
-		$url = self::strip_protocol_from_url( $url );
-		$url = str_replace( self::origin_host(), '', $url );
-		$url = str_replace( preg_replace( '/:\d+/', '', self::origin_host() ), '', $url );
+		// Keep behavior robust: only remove the leading scheme/host (and optional base path),
+		// never replace occurrences inside filenames or deeper path segments.
+		if ( ! is_string( $url ) ) {
+			return $url;
+		}
 
-		return $url;
+		// Remove scheme to work with a canonical form like: host[:port]/base/path...
+		$no_scheme = self::strip_protocol_from_url( $url );
+
+		// Determine origin components reliably (host and optional base path for subdirectory installs)
+		$origin_parts = function_exists( 'wp_parse_url' ) ? wp_parse_url( self::origin_url() ) : parse_url( self::origin_url() );
+		if ( ! is_array( $origin_parts ) ) {
+			$origin_parts = array();
+		}
+		$origin_host = isset( $origin_parts['host'] ) ? $origin_parts['host'] : '';
+		$origin_path = isset( $origin_parts['path'] ) ? untrailingslashit( $origin_parts['path'] ) : '';
+
+		// Build an anchored pattern that matches only the leading host[:port] and optional base path.
+		if ( $origin_host !== '' ) {
+			$host_pattern = '^' . preg_quote( $origin_host, '/' ) . '(?::\d+)?';
+			$base_pattern = $origin_path !== '' ? preg_quote( $origin_path, '/' ) : '';
+			$pattern      = '/' . $host_pattern . $base_pattern . '/';
+			$no_host      = preg_replace( $pattern, '', $no_scheme, 1 );
+		} else {
+			// Fallback: origin_host() may include subdirectory; strip only once at the start to avoid touching filenames.
+			$fallback     = self::origin_host();
+			$pattern      = '/^' . preg_quote( $fallback, '/' ) . '/';
+			$no_host      = preg_replace( $pattern, '', $no_scheme, 1 );
+		}
+
+		// Ensure a single leading slash for a clean local path, preserving any query/fragment later.
+		return '/' . ltrim( $no_host, '/' );
 	}
 
 	/**
@@ -1009,6 +1036,21 @@ class Util {
 	public static function sanitize_filename( $filename ) {
 		if ( $filename === '__qs' ) return $filename;
 
+		/**
+		 * Filter whether to preserve original filenames without sanitization.
+		 *
+		 * When true, spaces and special characters in filenames are preserved
+		 * instead of being converted to hyphens. This is useful for sites with
+		 * large existing static structures that rely on original filenames.
+		 *
+		 * @since 3.6.0.1
+		 *
+		 * @param bool $preserve Whether to preserve original filenames. Default false.
+		 */
+		if ( apply_filters( 'ss_preserve_original_filenames', false ) ) {
+			return $filename;
+		}
+
 		// Bypass for safe ASCII (alphanumerics, hyphens, underscores, dots)
 		if ( preg_match( '/^[a-zA-Z0-9\-_.]+$/', $filename ) && substr( $filename, -1 ) !== '.' ) {
 			return $filename;
@@ -1020,7 +1062,11 @@ class Util {
 		}
 
 		// Remove bullet points, ellipses, copyright, and private use characters
-		$filename = preg_replace( '/[\x{2022}\x{2026}\x{00A9}\x{E000}-\x{F8FF}]/u', '-', $filename );
+		$filename = preg_replace( '/[\x{2022}\x{2026}\x{00A9}\x{E000}-\x{F8FF}]/u', '-', (string) $filename );
+
+		if ( is_null( $filename ) ) {
+			$filename = '';
+		}
 
 		return sanitize_file_name( $filename );
 	}
@@ -1048,7 +1094,7 @@ class Util {
 		$clean_path     = self::remove_params_and_fragment( $path );
 		$query_fragment = substr( $path, strlen( $clean_path ) );
 
-		return self::sanitize_path( (string) urldecode( $clean_path ) ) . $query_fragment;
+		return self::sanitize_path( urldecode( $clean_path ) ) . $query_fragment;
 	}
 
 	/**
