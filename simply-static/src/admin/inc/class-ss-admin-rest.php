@@ -124,6 +124,15 @@ class Admin_Rest {
             },
         ) );
 
+        // Unpushed changes count
+        register_rest_route( 'simplystatic/v1', '/unpushed-changes', array(
+            'methods'             => 'GET',
+            'callback'            => [ $this, 'get_unpushed_changes' ],
+            'permission_callback' => function () {
+                return current_user_can( apply_filters( 'ss_user_capability', 'manage_options', 'settings' ) );
+            },
+        ) );
+
         // Export type helper
         register_rest_route( 'simplystatic/v1', '/export-type', array(
             'methods'             => 'GET',
@@ -499,13 +508,19 @@ class Admin_Rest {
         if ( ! function_exists( 'get_plugins' ) ) {
             require_once ABSPATH . 'wp-admin/includes/plugin.php';
         }
-        $active = (array) Util::get_all_active_plugins();
-        $all    = (array) get_plugins();
-        $list   = [];
+        $active   = (array) Util::get_all_active_plugins();
+        $all      = (array) get_plugins();
+        $required = Util::get_required_plugins();
+        $req_lc   = array_map( 'strtolower', $required );
+        $list     = [];
         foreach ( $active as $plugin_file ) {
             $dir    = dirname( $plugin_file );
             $label  = isset( $all[ $plugin_file ]['Name'] ) ? $all[ $plugin_file ]['Name'] : $dir;
-            $list[] = [ 'slug' => $dir, 'label' => $label ];
+            $list[] = [
+                'slug'     => $dir,
+                'label'    => $label,
+                'required' => in_array( strtolower( sanitize_title( $dir ) ), $req_lc, true ),
+            ];
         }
 
         return json_encode( [ 'status' => 200, 'data' => $list ] );
@@ -591,6 +606,77 @@ class Admin_Rest {
                 'export_type_id' => $export_type_id,
             ],
         ] );
+    }
+
+    /**
+     * Count unpushed changes since the last export.
+     *
+     * Considers:
+     * 1. Posts/pages modified after the last export end time.
+     * 2. Rows in the Pro delete-tracker table (if it exists).
+     *
+     * @return string JSON response with total count.
+     */
+    public function get_unpushed_changes() {
+        global $wpdb;
+
+        $options          = Options::reinstance();
+        $last_export_end  = $options->get( 'archive_end_time' );
+        $modified_count   = 0;
+        $deleted_count    = 0;
+
+        // 1. Count posts modified since last export.
+        if ( ! empty( $last_export_end ) ) {
+            $post_types = get_post_types( array( 'public' => true ), 'names' );
+            $placeholders = implode( ',', array_fill( 0, count( $post_types ), '%s' ) );
+
+            // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+            $modified_count = (int) $wpdb->get_var(
+                $wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_status = 'publish' AND post_type IN ({$placeholders}) AND post_modified > %s",
+                    array_merge( array_values( $post_types ), array( $last_export_end ) )
+                )
+            );
+        }
+
+        // 2. Count rows in the delete tracker table (Pro feature).
+        //    Only count rows added after the last export so that stale/structural
+        //    entries (e.g. plugin_deactivate) already handled by an export are excluded.
+        $delete_table = $wpdb->prefix . 'simply_static_delete_pages';
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $table_exists = $wpdb->get_var( "SHOW TABLES LIKE '{$delete_table}'" );
+        if ( $table_exists === $delete_table ) {
+            if ( ! empty( $last_export_end ) ) {
+                // deleted_at is stored in GMT; convert local archive_end_time to GMT for comparison.
+                $last_export_end_gmt = get_gmt_from_date( $last_export_end );
+                $deleted_count = (int) $wpdb->get_var(
+                    $wpdb->prepare(
+                        "SELECT COUNT(*) FROM {$delete_table} WHERE site_id = %d AND deleted_at > %s",
+                        get_current_blog_id(),
+                        $last_export_end_gmt
+                    )
+                );
+            } else {
+                // No previous export — count all tracked deletions.
+                $deleted_count = (int) $wpdb->get_var(
+                    $wpdb->prepare(
+                        "SELECT COUNT(*) FROM {$delete_table} WHERE site_id = %d",
+                        get_current_blog_id()
+                    )
+                );
+            }
+        }
+
+        $total = $modified_count + $deleted_count;
+
+        return json_encode( array(
+            'status' => 200,
+            'data'   => array(
+                'total'          => $total,
+                'modified_count' => $modified_count,
+                'deleted_count'  => $deleted_count,
+            ),
+        ) );
     }
 
     /**
@@ -727,6 +813,11 @@ class Admin_Rest {
             }
         }
 
+        // Ensure required plugins (e.g. Simply Static Pro) are always present.
+        if ( isset( $settings['plugins_to_include'] ) && is_array( $settings['plugins_to_include'] ) ) {
+            $settings['plugins_to_include'] = Util::ensure_required_plugins( $settings['plugins_to_include'] );
+        }
+
         return $settings;
     }
 
@@ -846,6 +937,7 @@ class Admin_Rest {
             'ss_single_include_pagination',
             'ss_single_export_add_xml_sitemap',
             'ss_single_auto_export',
+            'ss_tools_submenu',
         ];
 
         foreach ( $options as $key => $value ) {
@@ -916,6 +1008,11 @@ class Admin_Rest {
                 }
                 $options['plugins_to_include'] = $rebuild;
             }
+        }
+
+        // Ensure required plugins (e.g. Simply Static Pro) are always present.
+        if ( isset( $options['plugins_to_include'] ) && is_array( $options['plugins_to_include'] ) ) {
+            $options['plugins_to_include'] = Util::ensure_required_plugins( $options['plugins_to_include'] );
         }
 
         // Multisite: also persist per-site copy under site option when not main site

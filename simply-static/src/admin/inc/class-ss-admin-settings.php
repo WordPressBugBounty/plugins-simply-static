@@ -93,9 +93,7 @@ class Admin_Settings {
      * @return void
      */
     public function add_menu() {
-        if ( apply_filters( 'ss_hide_admin_menu', false ) ) {
-            return;
-        }
+        $hide_menu  = apply_filters( 'ss_hide_admin_menu', false );
 
         // Generate settings page.
         add_menu_page(
@@ -150,6 +148,19 @@ class Admin_Settings {
         }
 
         if ( ! defined( 'SIMPLY_STATIC_PRO_VERSION' ) ) {
+            // Add Simply Static Pro submenu that links to external URL
+            add_submenu_page(
+                    'simply-static-generate',
+                    __( 'Simply Static Pro', 'simply-static' ),
+                    __( 'Simply Static Pro<i class="dashicons dashicons-external" style="font-size:12px;vertical-align:-2px;height:10px;"></i>', 'simply-static' ),
+                    apply_filters( 'ss_user_capability', 'publish_pages', 'generate' ),
+                    'simply-static-pro-link',
+                    function () {
+                        exit;
+                    },
+                    99
+            );
+
             // Add Simply Static Studio submenu that links to external URL
             add_submenu_page(
                     'simply-static-generate',
@@ -163,17 +174,85 @@ class Admin_Settings {
                     100
             );
 
-            // Add JavaScript to open the Studio link in a new tab
+            // Add JavaScript to open the Pro and Studio links in new tabs + purple highlight
             add_action( 'admin_footer', function () {
                 ?>
                 <script type="text/javascript">
                     jQuery(document).ready(function ($) {
-                        // Find the Simply Static Studio menu item and modify its behavior
-                        $('a[href="admin.php?page=simply-static-studio"]').attr('href', 'https://simplystatic.com/simply-static-studio/').attr('target', '_blank');
+                        var accentColor = getComputedStyle(document.documentElement).getPropertyValue('--wp-admin-theme-color').trim() || '#3858e9';
+                        // Find the Simply Static Pro menu item and modify its behavior
+                        $('a[href="admin.php?page=simply-static-pro-link"]').attr('href', 'https://simplystatic.com/simply-static-pro/?utm_source=wordpress&utm_medium=submenu&utm_campaign=upsell').attr('target', '_blank');
+                        // Find the Static Studio menu item and modify its behavior
+                        $('a[href="admin.php?page=simply-static-studio"]').attr('href', 'https://simplystatic.com/simply-static-studio/?utm_source=wordpress&utm_medium=submenu&utm_campaign=upsell').attr('target', '_blank');
+                        // Apply persistent highlight color via JS to avoid CSS override
+                        var $promoLinks = $('a[href*="simplystatic.com/simply-static-pro"], a[href*="simplystatic.com/simply-static-studio"]');
+                        $promoLinks.css({ 'color': accentColor, 'font-weight': '600' });
+                        // Re-apply on hover/focus to prevent WP core styles from overriding
+                        $promoLinks.on('mouseenter focus', function() { $(this).css('color', accentColor); });
+                        $promoLinks.on('mouseleave blur', function() { $(this).css('color', accentColor); });
                     });
                 </script>
                 <?php
             } );
+        }
+
+      		// Command Center: hide the top-level sidebar menu and add a link under Tools → Simply Static.
+        if ( $hide_menu ) {
+            add_action( 'admin_head', function () {
+                echo '<style>#toplevel_page_simply-static-generate{display:none!important;}</style>';
+            } );
+
+            // Register a Tools submenu that links directly to the original page.
+            global $submenu;
+            $tools_brand = defined( 'SSS_VERSION' ) ? __( 'Simply Static Studio', 'simply-static' ) : __( 'Simply Static', 'simply-static' );
+            $submenu['tools.php'][] = array(
+                $tools_brand,
+                apply_filters( 'ss_user_capability', 'publish_pages', 'generate' ),
+                admin_url( 'admin.php?page=simply-static-generate' ),
+            );
+
+            // Make the Tools menu open and Simply Static highlighted when on any SS page.
+            add_filter( 'parent_file', function ( $parent_file ) {
+                $screen = get_current_screen();
+                if ( $screen && isset( $_GET['page'] ) && strpos( $_GET['page'], 'simply-static' ) === 0 ) {
+                    return 'tools.php';
+                }
+                return $parent_file;
+            } );
+
+            add_filter( 'submenu_file', function ( $submenu_file, $parent_file ) {
+                if ( isset( $_GET['page'] ) && strpos( $_GET['page'], 'simply-static' ) === 0 ) {
+                    return admin_url( 'admin.php?page=simply-static-generate' );
+                }
+                return $submenu_file;
+            }, 10, 2 );
+
+            // Force the Tools menu open via JS when on any SS page (handles WP menu state conflicts).
+            if ( isset( $_GET['page'] ) && strpos( $_GET['page'], 'simply-static' ) === 0 ) {
+                add_action( 'admin_footer', function () {
+                    ?>
+                    <script type="text/javascript">
+                        (function(){
+                            // Remove active state from the hidden SS top-level menu.
+                            var ssMenu = document.getElementById('toplevel_page_simply-static-generate');
+                            if (ssMenu) {
+                                ssMenu.className = ssMenu.className
+                                    .replace(/wp-has-current-submenu/g, 'wp-not-current-submenu')
+                                    .replace(/wp-menu-open/g, '');
+                            }
+                            // Add active/open state to the Tools menu.
+                            var toolsMenu = document.getElementById('menu-tools');
+                            if (toolsMenu) {
+                                toolsMenu.className = toolsMenu.className
+                                    .replace(/wp-not-current-submenu/g, '')
+                                    .replace(/wp-menu-open/g, '');
+                                toolsMenu.className += ' wp-has-current-submenu wp-menu-open';
+                            }
+                        })();
+                    </script>
+                    <?php
+                } );
+            }
         }
     }
 
