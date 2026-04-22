@@ -379,10 +379,11 @@ class Url_Extractor {
 	}
 
 	/**
-	 * Preserve SVG data URIs inside style attributes to prevent DOMDocument from mangling them.
+	 * Preserve SVG data URIs to prevent DOMDocument from mangling them.
 	 *
-	 * DOMDocument parses raw <svg>...</svg> markup inside attribute values as actual elements,
-	 * which strips closing tags like </svg>. This method encodes them before DOM processing.
+	 * DOMDocument parses raw <svg>...</svg> markup inside attribute values and
+	 * <style> tag content as actual elements, which strips closing tags like </svg>.
+	 * This method encodes them before DOM processing.
 	 *
 	 * @param string $content The HTML content
 	 *
@@ -415,6 +416,40 @@ class Url_Extractor {
 				$this->svg_data_uris[] = $matches[2];
 
 				return $matches[1] . "style='SS_SVG_DATA_URI_PLACEHOLDER_" . $index . "'";
+			},
+			$content
+		);
+		if ( null !== $_result ) {
+			$content = $_result;
+		}
+
+		// Preserve SVG data URIs inside CSS url() constructs (typically found in <style> blocks).
+		// DOMDocument would otherwise parse <svg>...</svg> inside these as real SVG elements
+		// and strip the closing </svg> tag, breaking the inline SVG image.
+
+		// Double-quoted url("data:image/svg+xml......</svg>")
+		$_result = preg_replace_callback(
+			"/url\(\s*\"(data:image\/svg\+xml(?:[^\"\\\\]|\\\\.)*<\/svg>)\"\s*\)/is",
+			function ( $matches ) {
+				$index                 = count( $this->svg_data_uris );
+				$this->svg_data_uris[] = $matches[0];
+
+				return 'SS_SVG_DATA_URI_PLACEHOLDER_' . $index;
+			},
+			$content
+		);
+		if ( null !== $_result ) {
+			$content = $_result;
+		}
+
+		// Single-quoted url('data:image/svg+xml......</svg>')
+		$_result = preg_replace_callback(
+			"/url\(\s*'(data:image\/svg\+xml(?:[^'\\\\]|\\\\.)*<\/svg>)'\s*\)/is",
+			function ( $matches ) {
+				$index                 = count( $this->svg_data_uris );
+				$this->svg_data_uris[] = $matches[0];
+
+				return 'SS_SVG_DATA_URI_PLACEHOLDER_' . $index;
 			},
 			$content
 		);
@@ -490,6 +525,96 @@ class Url_Extractor {
 		}, $content );
 
 		return $content;
+	}
+
+	/**
+	 * Repair HTML structure to match browser (HTML5 parser) behavior before DOMDocument.
+	 *
+	 * When a sectioning element (e.g. <section>) is closed with </section> but contains
+	 * unclosed child elements (e.g. <div>), browsers implicitly close those children.
+	 * DOMDocument (libxml2 HTML4 parser) does NOT — it keeps the child open and reparents
+	 * subsequent sibling elements into the unclosed child, breaking the page layout.
+	 *
+	 * This method scans through the HTML with a tag stack and inserts the missing closing
+	 * tags before each sectioning closing tag, matching browser behavior.
+	 *
+	 * @param string $html The HTML string to repair.
+	 *
+	 * @return string The repaired HTML string.
+	 */
+	private function repair_html_structure( $html ) {
+		if ( empty( $html ) ) {
+			return $html;
+		}
+
+		$void_elements  = array_flip( [ 'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr' ] );
+		$sectioning     = array_flip( [ 'section', 'article', 'aside', 'nav', 'main', 'header', 'footer' ] );
+		$stack          = [];
+		$result         = '';
+		$offset         = 0;
+
+		// Regex to match HTML tags. Uses a pattern that handles quoted attributes properly
+		// to avoid matching '>' inside attribute values.
+		$tag_pattern = '/<(\/?)([a-zA-Z][a-zA-Z0-9]*)(\s[^>]*)?\/?>/s';
+
+		while ( preg_match( $tag_pattern, $html, $match, PREG_OFFSET_CAPTURE, $offset ) ) {
+			$tag_full       = $match[0][0];
+			$tag_pos        = $match[0][1];
+			$is_closing     = ( $match[1][0] === '/' );
+			$tag_name       = strtolower( $match[2][0] );
+			$is_self_close  = ( substr( rtrim( $tag_full ), -2 ) === '/>' );
+
+			// Append content before this tag.
+			$result .= substr( $html, $offset, $tag_pos - $offset );
+			$offset  = $tag_pos + strlen( $tag_full );
+
+			// Skip void and self-closing elements.
+			if ( isset( $void_elements[ $tag_name ] ) || $is_self_close ) {
+				$result .= $tag_full;
+				continue;
+			}
+
+			if ( $is_closing ) {
+				if ( isset( $sectioning[ $tag_name ] ) ) {
+					// Closing a sectioning element: close all unclosed children first.
+					$close_tags = '';
+					while ( ! empty( $stack ) ) {
+						$top = end( $stack );
+
+						if ( $top === $tag_name ) {
+							// Found the matching opening sectioning tag — pop it and stop.
+							array_pop( $stack );
+							break;
+						}
+
+						// Pop and emit a closing tag for this unclosed child element.
+						array_pop( $stack );
+						$close_tags .= "</{$top}>";
+					}
+
+					$result .= $close_tags . $tag_full;
+				} else {
+					// Regular closing tag — find and remove its matching opener from the stack.
+					for ( $i = count( $stack ) - 1; $i >= 0; $i-- ) {
+						if ( $stack[ $i ] === $tag_name ) {
+							array_splice( $stack, $i, 1 );
+							break;
+						}
+					}
+
+					$result .= $tag_full;
+				}
+			} else {
+				// Opening tag — push onto the stack.
+				$stack[] = $tag_name;
+				$result .= $tag_full;
+			}
+		}
+
+		// Append any remaining content after the last tag.
+		$result .= substr( $html, $offset );
+
+		return $result;
 	}
 
 	/**
@@ -933,6 +1058,13 @@ class Url_Extractor {
 		if ( ! is_string( $html_string ) || trim( $html_string ) === '' ) {
 			return $html_string;
 		}
+
+		// Repair unclosed elements inside sectioning tags before DOMDocument parsing.
+		// Browsers (HTML5 parser) implicitly close open child elements (e.g. <div>) when
+		// encountering a parent's closing tag (e.g. </section>), but DOMDocument (libxml2
+		// HTML4 parser) does not — it keeps the child open and reparents subsequent
+		// sibling elements inside it, breaking the intended page structure.
+		$html_string = $this->repair_html_structure( $html_string );
 
 		// Use PHP's native DOMDocument
 		$dom = new DOMDocument();
