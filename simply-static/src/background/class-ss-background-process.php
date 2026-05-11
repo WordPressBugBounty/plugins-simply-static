@@ -160,8 +160,14 @@ abstract class Background_Process extends Async_Request {
 	 * @return array|WP_Error|false HTTP Response array, WP_Error on failure, or false if not attempted.
 	 */
 	public function dispatch() {
+		// Always schedule the cron healthcheck first, so that even if the
+		// dispatch is skipped (e.g. process lock still held), the cron can
+		// recover and re-attempt processing later.
+		$this->schedule_event();
+
 		if ( $this->is_processing() ) {
 			// Process already running.
+			Util::debug_log( 'Dispatch skipped: background process is already running (lock held).' );
 			return false;
 		}
 
@@ -177,9 +183,6 @@ abstract class Background_Process extends Async_Request {
 
 			return false;
 		}
-
-		// Schedule the cron healthcheck.
-		$this->schedule_event();
 
 		// If the loopback is known to be broken, skip the remote POST and
 		// process the queue inline via a shutdown function.
@@ -225,6 +228,13 @@ abstract class Background_Process extends Async_Request {
 			return $override;
 		}
 
+		// Known hosting environments where loopback requests are unreliable.
+		if ( $this->is_restricted_hosting() ) {
+			Util::debug_log( 'Restricted hosting environment detected. Falling back to inline processing.' );
+
+			return false;
+		}
+
 		$transient_key = $this->identifier . '_loopback_available';
 		$cached        = get_site_transient( $transient_key );
 
@@ -255,9 +265,58 @@ abstract class Background_Process extends Async_Request {
 			return false;
 		}
 
+		// Check HTTP status code — a non-200 response means the loopback
+		// endpoint is not reachable properly (e.g. proxy/WAF blocking).
+		$status_code = wp_remote_retrieve_response_code( $response );
+
+		if ( $status_code < 200 || $status_code >= 300 ) {
+			Util::debug_log( 'Loopback test returned HTTP ' . $status_code . '. Falling back to inline processing.' );
+			set_site_transient( $transient_key, 'no', HOUR_IN_SECONDS );
+
+			return false;
+		}
+
 		set_site_transient( $transient_key, 'yes', HOUR_IN_SECONDS );
 
 		return true;
+	}
+
+	/**
+	 * Detect hosting environments known to block or interfere with loopback requests.
+	 *
+	 * These hosts typically use reverse proxies, aggressive security layers, or
+	 * non-standard PHP-FPM configurations that cause non-blocking self-requests
+	 * to silently fail even when a blocking test appears to succeed.
+	 *
+	 * @return bool True if running on a restricted host, false otherwise.
+	 */
+	protected function is_restricted_hosting() {
+		/**
+		 * Filter to override restricted hosting detection.
+		 *
+		 * Return true to force inline processing, false to skip hosting detection.
+		 * Return null to use automatic detection (default).
+		 *
+		 * @param null|bool $is_restricted Null for auto-detect, bool to override.
+		 */
+		$override = apply_filters( $this->identifier . '_is_restricted_hosting', null );
+
+		if ( is_bool( $override ) ) {
+			return $override;
+		}
+
+		// WP Engine: uses reverse proxy and security layers that can silently
+		// drop non-blocking loopback requests.
+		if ( defined( 'WPE_APIKEY' ) || ( function_exists( 'is_wpe' ) && is_wpe() ) ) {
+			return true;
+		}
+
+		// Flywheel: shares infrastructure with WP Engine.
+		if ( defined( 'FLYWHEEL_CONFIG_DIR' ) ) {
+			return true;
+		}
+
+		return false;
 	}
 
 	/**
