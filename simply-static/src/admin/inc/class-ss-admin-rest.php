@@ -1158,6 +1158,7 @@ class Admin_Rest {
             's3_access_secret'              => '',
             's3_bucket'                     => '',
             's3_subdirectory'               => '',
+            'use_search_results_page'       => true,
             'fix_cors'                      => 'allowed_http_origins',
             // (the full list continues in Admin_Settings; retain same defaults here)
         );
@@ -1178,6 +1179,7 @@ class Admin_Rest {
             'theme_style_name'              => 'style',
             'archive_start_time'            => null,
             'archive_end_time'              => null,
+            'css_optimize_preconnect_hints' => false,
             'version'                       => SIMPLY_STATIC_VERSION,
         ) );
 

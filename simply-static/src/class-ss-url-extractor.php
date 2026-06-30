@@ -644,10 +644,10 @@ class Url_Extractor {
 		$response_body = $this->preserve_xmp_tags( $response_body );
 
 		// replace wp_json_encode'd urls, as used by WP's `concatemoji`
-		$response_body = str_replace( addcslashes( Util::origin_url(), '/' ), addcslashes( $destination_url, '/' ), $response_body );
+		$response_body = preg_replace( '/' . Util::json_escaped_origin_url_pattern() . '/i', addcslashes( untrailingslashit( $destination_url ), '/' ), $response_body );
 
 		// replace encoded URLs, as found in query params
-		$response_body = preg_replace( '/(https?%3A)?%2F%2F' . addcslashes( urlencode( Util::origin_host() ), '.' ) . '/i', urlencode( $destination_url ), $response_body );
+		$response_body = preg_replace( '/(https?%3A)?%2F%2F' . Util::origin_host_pattern( true ) . '/i', urlencode( $destination_url ), $response_body );
 
 		// Restore preserved <xmp> tags
 		$response_body = $this->restore_xmp_tags( $response_body );
@@ -676,11 +676,11 @@ class Url_Extractor {
 		$content = $this->preserve_xmp_tags( $content );
 
 		// replace any instance of the origin url, whether it starts with https://, http://, or //.
-		$content = preg_replace( '/(https?:)?\/\/' . addcslashes( Util::origin_host(), '/' ) . '/i', $destination_url, $content );
+		$content = preg_replace( '/(https?:)?\/\/' . Util::origin_host_pattern() . '/i', $destination_url, $content );
 
 		// replace wp_json_encode'd urls, as used by WP's `concatemoji`.
 		// e.g. {"concatemoji":"http:\/\/www.example.org\/wp-includes\/js\/wp-emoji-release.min.js?ver=4.6.1"}.
-		$content = str_replace( addcslashes( untrailingslashit( Util::origin_url() ), '/' ), addcslashes( untrailingslashit( $destination_url ), '/' ), $content );
+		$content = preg_replace( '/' . Util::json_escaped_origin_url_pattern() . '/i', addcslashes( untrailingslashit( $destination_url ), '/' ), $content );
 
 		// Restore preserved <xmp> tags
 		$content = $this->restore_xmp_tags( $content );
@@ -917,6 +917,13 @@ class Url_Extractor {
 
 				// we need to verify that the meta tag is a URL.
 				if ( 'meta' === $tag_name ) {
+					$runtime_path = $this->convert_runtime_local_path( $attribute_value );
+
+					if ( $runtime_path !== $attribute_value ) {
+						$tag->setAttribute( $attribute_name, $runtime_path );
+						continue;
+					}
+
 					if ( filter_var( $attribute_value, FILTER_VALIDATE_URL ) ) {
 						$extracted_urls[] = $attribute_value;
 					}
@@ -1664,19 +1671,130 @@ class Url_Extractor {
 
 		// Replace URLs in the script content
 		// First, replace protocol-relative URLs (//example.com)
-		$text = preg_replace( '/(["\'(])\/\/' . addcslashes( Util::origin_host(), '/' ) . '/i', '$1' . $convert_to, $decoded_text );
+		$text = preg_replace( '/(["\'(])\/\/' . Util::origin_host_pattern() . '/i', '$1' . $convert_to, $decoded_text );
 
 		// Then replace absolute URLs (http://example.com or https://example.com)
-		$text = preg_replace( '/(["\'(])(https?:)?\/\/' . addcslashes( Util::origin_host(), '/' ) . '/i', '$1' . $convert_to, $text );
+		$text = preg_replace( '/(["\'(])(https?:)?\/\/' . Util::origin_host_pattern() . '/i', '$1' . $convert_to, $text );
 
 		// Also replace JSON-encoded URLs
-		$text = str_replace( addcslashes( untrailingslashit( Util::origin_url() ), '/' ), addcslashes( untrailingslashit( $convert_to ), '/' ), $text );
+		$text = preg_replace( '/' . Util::json_escaped_origin_url_pattern() . '/i', addcslashes( untrailingslashit( $convert_to ), '/' ), $text );
 
 		// Replace URLs in sourceURL and sourceMappingURL comments (used for debugging)
 		// Handles both //# and //@ formats (the latter is deprecated but still used)
-		$text = preg_replace( '/(\/\/[#@]\s*(?:sourceURL|sourceMappingURL)\s*=\s*)(https?:)?\/\/' . addcslashes( Util::origin_host(), '/' ) . '/i', '$1' . $convert_to, $text );
+		$text = preg_replace( '/(\/\/[#@]\s*(?:sourceURL|sourceMappingURL)\s*=\s*)(https?:)?\/\/' . Util::origin_host_pattern() . '/i', '$1' . $convert_to, $text );
+
+		$text = $this->replace_runtime_local_paths_in_script( $text );
 
 		return $text;
+	}
+
+	/**
+	 * Replace root-relative WordPress runtime paths inside JS string literals.
+	 *
+	 * Some plugins expose asset bases in inline config, for example Elementor's
+	 * `elementorFrontendConfig.urls.assets`. Those values may be root-relative
+	 * (`/wp-content/...`) or JSON-escaped (`\/wp-content\/...`). Under file://,
+	 * root-relative paths resolve against the filesystem root, so convert them
+	 * relative to the current exported HTML page. Unlike normal page URLs, these
+	 * runtime paths can be asset directories and must not receive /index.html.
+	 *
+	 * @param string $text Script content.
+	 *
+	 * @return string
+	 */
+	private function replace_runtime_local_paths_in_script( $text ) {
+		$_result = preg_replace_callback(
+			'/(["\'])((?:(?:\\\\\/){1,2}|\/{1,2})(?:wp-admin|wp-content|wp-includes|wp-json)(?:\\\\.|(?!\1).)*)\1/s',
+			function ( $matches ) {
+				$updated_path = $this->convert_runtime_local_path( $matches[2] );
+
+				return $matches[1] . $updated_path . $matches[1];
+			},
+			$text
+		);
+
+		if ( null !== $_result ) {
+			$text = $_result;
+		}
+
+		$_result = preg_replace_callback(
+			'/(\/\/[#@]\s*(?:sourceURL|sourceMappingURL)\s*=\s*)((?:(?:\\\\\/){1,2}|\/{1,2})(?:wp-admin|wp-content|wp-includes|wp-json)[^\s]+)/i',
+			function ( $matches ) {
+				return $matches[1] . $this->convert_runtime_local_path( $matches[2] );
+			},
+			$text
+		);
+
+		return null !== $_result ? $_result : $text;
+	}
+
+	/**
+	 * Convert a root-relative WordPress runtime path for static output.
+	 *
+	 * @param string $path Root-relative path, optionally JSON-escaped.
+	 *
+	 * @return string
+	 */
+	private function convert_runtime_local_path( $path ) {
+		if ( ! is_string( $path ) || '' === $path ) {
+			return $path;
+		}
+
+		$uses_escaped_slashes = strpos( $path, '\\/' ) !== false;
+		$normalized_path     = str_replace( '\\/', '/', $path );
+
+		if ( strpos( $normalized_path, '*' ) !== false ) {
+			return $path;
+		}
+
+		if ( preg_match( '~^//(?:wp-admin|wp-content|wp-includes|wp-json)(?:[/?#]|$)~i', $normalized_path ) ) {
+			$normalized_path = '/' . ltrim( $normalized_path, '/' );
+		}
+
+		if ( ! preg_match( '~^/(?:wp-admin|wp-content|wp-includes|wp-json)(?:[/?#]|$)~i', $normalized_path ) ) {
+			return $path;
+		}
+
+		$url = Util::relative_to_absolute_url( $normalized_path, $this->static_page->url );
+
+		if ( $url ) {
+			$url = Util::normalize_url( $url );
+		}
+
+		if ( ! $url || ! Util::is_local_url( $url ) ) {
+			return $path;
+		}
+
+		$converted_path = $this->convert_runtime_local_url( $url );
+
+		if ( $uses_escaped_slashes ) {
+			return addcslashes( $converted_path, '/' );
+		}
+
+		return $converted_path;
+	}
+
+	/**
+	 * Convert a local runtime URL without adding page index filenames.
+	 *
+	 * @param string $url Absolute local URL.
+	 *
+	 * @return string
+	 */
+	private function convert_runtime_local_url( $url ) {
+		if ( $this->options->get( 'destination_url_type' ) == 'absolute' ) {
+			return $this->convert_absolute_url( $url );
+		} else if ( $this->options->get( 'destination_url_type' ) == 'relative' ) {
+			return $this->convert_relative_url( $url );
+		}
+
+		$page_path           = Util::get_public_path_from_local_url( $this->static_page->url );
+		$sanitized_page_path = Util::sanitize_local_path( $page_path );
+
+		$runtime_path           = Util::get_public_path_from_local_url( $url );
+		$sanitized_runtime_path = Util::sanitize_local_path( $runtime_path );
+
+		return Util::create_offline_path( $sanitized_runtime_path, $sanitized_page_path );
 	}
 
 
