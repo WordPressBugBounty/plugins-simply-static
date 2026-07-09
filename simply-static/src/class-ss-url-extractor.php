@@ -96,7 +96,7 @@ class Url_Extractor {
 		'wml'      => array( 'xmlns' ),
 
 		'meta' => array( 'content' ),
-		'link' => array( 'href', 'data-pmdelayedstyle' ),
+		'link' => array( 'href', 'imagesrcset', 'data-pmdelayedstyle' ),
 		'atom' => array( 'href' ),
 	);
 
@@ -885,22 +885,16 @@ class Url_Extractor {
 			}
 		}
 
-		// Handle link tags with rel="preconnect" or rel="dns-prefetch" pointing to origin host.
-		// These tags are browser hints for establishing early connections to external servers.
-		// In a static export, referencing the origin (WordPress) host is both useless and a security
-		// concern as it exposes the staging/source URL. Remove these tags entirely.
+		// Remove local resource hints. They are useless in static output and can
+		// expose a hidden WordPress/staging host in proxy/custom-domain setups.
 		if ( 'link' === $tag_name && $tag->hasAttribute( 'rel' ) && $tag->hasAttribute( 'href' ) ) {
-			$rel_value = strtolower( trim( $tag->getAttribute( 'rel' ) ) );
-			if ( in_array( $rel_value, array( 'preconnect', 'dns-prefetch' ), true ) ) {
-				$href_value = $tag->getAttribute( 'href' );
-				// Check if the href points to the origin host
-				$origin_host = Util::origin_host();
-				if ( stripos( Util::strip_protocol_from_url( $href_value ), $origin_host ) === 0 ) {
-					// Remove the tag from the DOM entirely
-					$tag->parentNode->removeChild( $tag );
+			$rel  = $tag->getAttribute( 'rel' );
+			$href = $tag->getAttribute( 'href' );
 
-					return;
-				}
+			if ( $this->is_local_resource_hint( $rel, $href ) || $this->is_current_wordpress_resource_hint( $rel, $href ) ) {
+				$tag->parentNode->removeChild( $tag );
+
+				return;
 			}
 		}
 
@@ -984,6 +978,98 @@ class Url_Extractor {
 				$tag->setAttribute( $attribute_name, $attribute_value );
 			}
 		}
+	}
+
+	/**
+	 * Determine if a link element is a local resource hint that should not be
+	 * emitted in the static export.
+	 *
+	 * @param string $rel  Link rel attribute.
+	 * @param string $href Link href attribute.
+	 *
+	 * @return bool
+	 */
+	private function is_local_resource_hint( $rel, $href ) {
+		$rel_tokens = preg_split( '/\s+/', strtolower( trim( (string) $rel ) ) );
+		$rel_tokens = is_array( $rel_tokens ) ? array_filter( $rel_tokens ) : array();
+
+		if ( ! array_intersect( $rel_tokens, array( 'preconnect', 'dns-prefetch' ) ) ) {
+			return false;
+		}
+
+		$href = trim( (string) $href );
+		if ( '' === $href ) {
+			return false;
+		}
+
+		$url = Util::relative_to_absolute_url( $href, $this->static_page->url );
+		if ( ! is_string( $url ) || '' === $url ) {
+			return false;
+		}
+
+		if ( 0 === strpos( $url, '//' ) ) {
+			$url = Util::origin_scheme() . ':' . $url;
+		}
+
+		if ( function_exists( 'wp_parse_url' ) ) {
+			$url_parts = wp_parse_url( $url );
+		} else {
+			$url_parts = parse_url( $url );
+		}
+
+		if ( ! is_array( $url_parts ) || empty( $url_parts['host'] ) ) {
+			return false;
+		}
+
+		return Util::is_local_url( $url );
+	}
+
+	/**
+	 * Determine if a resource hint points at a current WordPress host.
+	 *
+	 * The hint may be only scheme + host, so it cannot be detected as a local
+	 * asset URL by the normal path-based checks.
+	 *
+	 * @param string $rel  Link rel attribute.
+	 * @param string $href Link href attribute.
+	 *
+	 * @return bool
+	 */
+	private function is_current_wordpress_resource_hint( $rel, $href ) {
+		$rel_tokens = preg_split( '/\s+/', strtolower( trim( (string) $rel ) ) );
+		$rel_tokens = is_array( $rel_tokens ) ? array_filter( $rel_tokens ) : array();
+
+		if ( ! array_intersect( $rel_tokens, array( 'preconnect', 'dns-prefetch' ) ) ) {
+			return false;
+		}
+
+		$href = trim( (string) $href );
+		if ( '' === $href ) {
+			return false;
+		}
+
+		$url = Util::relative_to_absolute_url( $href, $this->static_page->url );
+		if ( ! is_string( $url ) || '' === $url ) {
+			return false;
+		}
+
+		if ( 0 === strpos( $url, '//' ) ) {
+			$url = Util::origin_scheme() . ':' . $url;
+		}
+
+		$url_parts = function_exists( 'wp_parse_url' ) ? wp_parse_url( $url ) : parse_url( $url );
+		$host      = is_array( $url_parts ) && ! empty( $url_parts['host'] ) ? strtolower( (string) $url_parts['host'] ) : '';
+
+		$is_current_wordpress_host = Util::is_current_wordpress_host( $host );
+
+		return (bool) apply_filters(
+			'ss_remove_current_wordpress_resource_hint',
+			$is_current_wordpress_host,
+			$url,
+			$rel,
+			$this->static_page,
+			$this
+		);
 	}
 
 	/**
@@ -1528,16 +1614,33 @@ class Url_Extractor {
 		// Pass 1: Handle url(...) constructs with quoted or unquoted values, including relative URLs.
 		// Pattern breakdown:
 		// - url( optional whitespace
-		// - capture optional quote (single or double) in group 1
-		// - capture the URL (anything but closing paren; we'll trim trailing whitespace) in group 2
-		// - match the same optional quote in group 3 via backreference
-		// - optional whitespace and closing paren
+		// - capture the url(...) value, then normalize quote placeholders inside
+		//   the callback. This prevents preserved entities like APOS_PLACEHOLDER
+		//   from being appended to extracted Gutenberg background-image URLs.
 		$text = preg_replace_callback(
-			'/url\(\s*(?:(["\'])\s*)?([^\)\s]+?)\s*(?:\1)?\s*\)/i',
-			function ( $m ) {
-				$quote = isset( $m[1] ) ? $m[1] : '';
-				$raw   = $m[2];
-				$val   = trim( $raw );
+			'/url\(\s*([^\)]*?)\s*\)/i',
+			function ( $m ) use ( $charset ) {
+				$raw   = trim( $m[1] );
+				$quote = '';
+				$val   = $raw;
+
+				if ( $raw !== '' ) {
+					$first_char = $raw[0];
+					$last_char  = substr( $raw, -1 );
+
+					if ( ( $first_char === '"' || $first_char === "'" ) && $last_char === $first_char ) {
+						$quote = $first_char;
+						$val   = substr( $raw, 1, -1 );
+					} else if ( 0 === strpos( $raw, 'APOS_PLACEHOLDER' ) && substr( $raw, -16 ) === 'APOS_PLACEHOLDER' ) {
+						$quote = "'";
+						$val   = substr( $raw, 16, -16 );
+					} else if ( 0 === strpos( $raw, 'QUOTE_PLACEHOLDER' ) && substr( $raw, -17 ) === 'QUOTE_PLACEHOLDER' ) {
+						$quote = '"';
+						$val   = substr( $raw, 17, -17 );
+					}
+				}
+
+				$val = html_entity_decode( $this->restore_attributes( trim( $val ) ), ENT_QUOTES | ENT_HTML5 | ENT_SUBSTITUTE, $charset );
 
 				// Skip data URIs or empty
 				if ( $val === '' || stripos( $val, 'data:' ) === 0 ) {
