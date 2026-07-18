@@ -981,6 +981,97 @@ class Url_Extractor {
 	}
 
 	/**
+	 * Remove WordPress REST discovery links when REST routes are not exported.
+	 *
+	 * @param DOMXPath $xpath XPath instance for the current document.
+	 *
+	 * @return void
+	 */
+	private function remove_unexported_rest_discovery_links( $xpath ) {
+		if ( $this->options->get( 'add_rest_api' ) ) {
+			return;
+		}
+
+		$links = $xpath->query( '//link[@rel]' );
+		if ( ! $links ) {
+			return;
+		}
+
+		$links_to_remove = array();
+		foreach ( $links as $link ) {
+			if ( $this->is_rest_discovery_link( $link ) ) {
+				$links_to_remove[] = $link;
+			}
+		}
+
+		foreach ( $links_to_remove as $link ) {
+			if ( $link->parentNode ) {
+				$link->parentNode->removeChild( $link );
+			}
+		}
+	}
+
+	/**
+	 * Determine whether a link element advertises a WordPress REST endpoint.
+	 *
+	 * @param \DOMElement $link Link element.
+	 *
+	 * @return bool
+	 */
+	private function is_rest_discovery_link( $link ) {
+		$rel_tokens = preg_split( '/\s+/', strtolower( trim( $link->getAttribute( 'rel' ) ) ) );
+		$rel_tokens = is_array( $rel_tokens ) ? array_filter( $rel_tokens ) : array();
+
+		if ( in_array( 'https://api.w.org/', $rel_tokens, true ) || in_array( 'https://api.w.org', $rel_tokens, true ) ) {
+			return true;
+		}
+
+		if ( ! in_array( 'alternate', $rel_tokens, true ) || ! $link->hasAttribute( 'href' ) ) {
+			return false;
+		}
+
+		$content_type = strtolower( trim( $link->getAttribute( 'type' ) ) );
+		if ( ! in_array( $content_type, array( 'application/json', 'application/json+oembed', 'text/xml+oembed' ), true ) ) {
+			return false;
+		}
+
+		return $this->is_wordpress_rest_url( $link->getAttribute( 'href' ) );
+	}
+
+	/**
+	 * Determine whether a URL resolves to a local WordPress REST route.
+	 *
+	 * @param string $href Link URL.
+	 *
+	 * @return bool
+	 */
+	private function is_wordpress_rest_url( $href ) {
+		$url = Util::relative_to_absolute_url( html_entity_decode( (string) $href, ENT_QUOTES | ENT_HTML5, 'UTF-8' ), $this->static_page->url );
+		if ( ! is_string( $url ) || '' === $url || ! Util::is_local_url( $url ) ) {
+			return false;
+		}
+
+		$parts = function_exists( 'wp_parse_url' ) ? wp_parse_url( $url ) : parse_url( $url );
+		if ( ! is_array( $parts ) ) {
+			return false;
+		}
+
+		$path = isset( $parts['path'] ) ? (string) $parts['path'] : '';
+		if ( 1 === preg_match( '#(?:^|/)wp-json(?:/|$)#i', $path ) ) {
+			return true;
+		}
+
+		if ( empty( $parts['query'] ) ) {
+			return false;
+		}
+
+		$query_args = array();
+		parse_str( html_entity_decode( (string) $parts['query'], ENT_QUOTES | ENT_HTML5, 'UTF-8' ), $query_args );
+
+		return array_key_exists( 'rest_route', $query_args );
+	}
+
+	/**
 	 * Determine if a link element is a local resource hint that should not be
 	 * emitted in the static export.
 	 *
@@ -1290,6 +1381,8 @@ class Url_Extractor {
 		if ( ! $dom->documentElement ) {
 			return $html_string;
 		} else {
+			$this->remove_unexported_rest_discovery_links( $xpath );
+
 			// handle tags with attributes
 			foreach ( $match_tags as $tag_name => $attributes ) {
 				$elements = $xpath->query( '//' . $tag_name );
@@ -1614,17 +1707,33 @@ class Url_Extractor {
 		// Pass 1: Handle url(...) constructs with quoted or unquoted values, including relative URLs.
 		// Pattern breakdown:
 		// - url( optional whitespace
-		// - capture the url(...) value, then normalize quote placeholders inside
+		// - prefer a complete quoted value, allowing escaped quotes and parentheses
+		// - otherwise capture an unquoted value up to its closing parenthesis
+		// - normalize quote placeholders inside
 		//   the callback. This prevents preserved entities like APOS_PLACEHOLDER
-		//   from being appended to extracted Gutenberg background-image URLs.
-		$text = preg_replace_callback(
-			'/url\(\s*([^\)]*?)\s*\)/i',
+		//   from being appended to extracted Gutenberg background-image URLs. Matching
+		//   the complete quoted value also prevents functions inside SVG data URIs
+		//   (for example rgb(...)) from being mistaken for the end of url(...). The
+		//   quote-specific branches consume ordinary characters in chunks so large
+		//   inline SVGs do not exhaust PCRE's backtracking or JIT stack limits.
+		$_result = preg_replace_callback(
+			'~url\(\s*(?:(?<double_quote>")(?<double>[^"\\\\]*+(?:\\\\.[^"\\\\]*+)*+)"|(?<single_quote>\')(?<single>[^\'\\\\]*+(?:\\\\.[^\'\\\\]*+)*+)\'|(?<unquoted>[^)\\\\]*+(?:\\\\.[^)\\\\]*+)*+))\s*\)~is',
 			function ( $m ) use ( $charset ) {
-				$raw   = trim( $m[1] );
-				$quote = '';
+				if ( isset( $m['double_quote'] ) && $m['double_quote'] === '"' ) {
+					$quote = '"';
+					$raw   = isset( $m['double'] ) ? $m['double'] : '';
+				} else if ( isset( $m['single_quote'] ) && $m['single_quote'] === "'" ) {
+					$quote = "'";
+					$raw   = isset( $m['single'] ) ? $m['single'] : '';
+				} else {
+					$quote = '';
+					$raw   = isset( $m['unquoted'] ) ? $m['unquoted'] : '';
+				}
+
+				$raw   = trim( $raw );
 				$val   = $raw;
 
-				if ( $raw !== '' ) {
+				if ( $quote === '' && $raw !== '' ) {
 					$first_char = $raw[0];
 					$last_char  = substr( $raw, -1 );
 
@@ -1661,10 +1770,13 @@ class Url_Extractor {
 			},
 			$text
 		);
+		if ( null !== $_result ) {
+			$text = $_result;
+		}
 
 		// Pass 2: Fallback - replace any remaining bare local absolute or protocol-relative URLs by converting them.
 		$escaped_origin = preg_quote( Util::origin_host(), '/' );
-		$text           = preg_replace_callback(
+		$_result        = preg_replace_callback(
 			'/((?:https?:)?\/\/' . $escaped_origin . ')[^"\')\s;,]+/i',
 			function ( $m ) {
 				$matched_url = $m[0];
@@ -1674,6 +1786,9 @@ class Url_Extractor {
 			},
 			$text
 		);
+		if ( null !== $_result ) {
+			$text = $_result;
+		}
 
 		// Pass 3: Fix HTML numeric entities used inside CSS content strings (e.g., content: "&#61710;" from Elementor/EAEL)
 		// Browsers do not decode HTML entities inside CSS. Convert these to proper CSS escapes like \f10e.
