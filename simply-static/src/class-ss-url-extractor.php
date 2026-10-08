@@ -163,6 +163,23 @@ class Url_Extractor {
 	private $active_source_origin = '';
 
 	/**
+	 * Additional URL regexes that should still be followed during Enhanced Crawl.
+	 *
+	 * @var string[]|null
+	 */
+	private $additional_url_regexes = null;
+
+	/**
+	 * Runtime origins that should be treated as local for the current page.
+	 *
+	 * This can contain both the hostname used to fetch the page and retired
+	 * Static Studio WordPress aliases still embedded in migrated content.
+	 *
+	 * @var array
+	 */
+	private $active_source_origins = array();
+
+	/**
 	 * Constructor
 	 *
 	 * @param string $static_page Simply_Static\Page to extract URLs from
@@ -262,37 +279,38 @@ class Url_Extractor {
 	 * @return array
 	 */
 	public function extract_and_update_urls() {
-		$source_origin                = $this->get_static_page_origin();
-		$source_origin_is_configured = $this->is_configured_local_origin( $source_origin );
-		$this->active_source_origin   = $source_origin;
+		$source_origin               = $this->get_static_page_origin();
+		$replacement_source_origins = $this->get_replacement_source_origins( $source_origin );
+		$this->active_source_origin  = $source_origin;
+		$this->active_source_origins = $replacement_source_origins;
 		// Configured bases retain their install paths; adding a bare origin here
 		// would incorrectly make sibling applications on the same host local.
-		$register_source_origin       = '' !== $source_origin && ! $source_origin_is_configured;
+		$register_source_origins     = ! empty( $replacement_source_origins );
 
-		if ( $register_source_origin ) {
+		if ( $register_source_origins ) {
 			add_filter( 'ss_local_url_bases', array( $this, 'add_active_source_origin_to_local_url_bases' ) );
 		}
 
 		try {
-			return $this->extract_and_update_urls_for_source_origin( $source_origin, $source_origin_is_configured );
+			return $this->extract_and_update_urls_for_source_origins( $replacement_source_origins );
 		} finally {
-			if ( $register_source_origin ) {
+			if ( $register_source_origins ) {
 				remove_filter( 'ss_local_url_bases', array( $this, 'add_active_source_origin_to_local_url_bases' ) );
 			}
 
-			$this->active_source_origin = '';
+			$this->active_source_origin  = '';
+			$this->active_source_origins = array();
 		}
 	}
 
 	/**
-	 * Run URL extraction while the fetched page origin is registered as local.
+	 * Run URL extraction while all source origins are registered as local.
 	 *
-	 * @param string $source_origin                Fetched page origin.
-	 * @param bool   $source_origin_is_configured Whether WordPress settings already include the origin.
+	 * @param array $source_origins Fetched and recognized legacy page origins.
 	 *
 	 * @return array
 	 */
-	private function extract_and_update_urls_for_source_origin( $source_origin, $source_origin_is_configured ) {
+	private function extract_and_update_urls_for_source_origins( $source_origins ) {
 		// Reset preserved tags for each extraction run
 		$this->xmp_tags = [];
 		$preserve_form_actions = $this->static_page->is_type( 'html' );
@@ -338,8 +356,8 @@ class Url_Extractor {
 					$this->force_replace_urls();
 				}
 
-				if ( '' !== $source_origin && ! $source_origin_is_configured ) {
-					$this->replace_unconfigured_source_origin_urls( $source_origin );
+				foreach ( $source_origins as $source_origin ) {
+					$this->replace_source_origin_urls( $source_origin );
 				}
 			}
 		} finally {
@@ -445,7 +463,7 @@ class Url_Extractor {
 	}
 
 	/**
-	 * Add the current fetched page origin to the local URL bases for one extraction.
+	 * Add the current page's source origins to the local URL bases for one extraction.
 	 *
 	 * @param array $bases Configured local URL bases.
 	 *
@@ -454,11 +472,83 @@ class Url_Extractor {
 	public function add_active_source_origin_to_local_url_bases( $bases ) {
 		$bases = (array) $bases;
 
-		if ( '' !== $this->active_source_origin ) {
-			$bases[] = $this->active_source_origin;
+		foreach ( $this->active_source_origins as $source_origin ) {
+			if ( '' !== $source_origin ) {
+				$bases[] = $source_origin;
+			}
 		}
 
 		return array_values( array_unique( array_filter( $bases ) ) );
+	}
+
+	/**
+	 * Get source origins that need local extraction and final replacement.
+	 *
+	 * The fetched page origin is included when WordPress does not already know
+	 * about it. On Static Studio, also include managed WordPress aliases found in
+	 * the page. Migrations can leave a retired staticN.studio alias in post data
+	 * even though the page is now fetched through an onstatic.studio runtime.
+	 *
+	 * @param string $source_origin Fetched page origin.
+	 *
+	 * @return array
+	 */
+	private function get_replacement_source_origins( $source_origin ) {
+		$origins = array();
+
+		if ( '' !== $source_origin && ! $this->is_configured_local_origin( $source_origin ) ) {
+			$origins[] = $source_origin;
+		}
+
+		if ( ! $this->is_static_studio_export( $source_origin ) ) {
+			return $origins;
+		}
+
+		$body = $this->get_body();
+		if ( ! is_string( $body ) || '' === $body ) {
+			return $origins;
+		}
+
+		// Normalize JSON-escaped slashes for detection only. The replacement pass
+		// still operates on the original body and handles both representations.
+		$body = str_replace( '\\/', '/', $body );
+		$pattern = '~(?:https?:)?//(wp(?:-|\\.)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.(?:onstatic|static\\d*)\\.studio)(?=$|[/?#\\s<>"\'])~i';
+		$matched = preg_match_all( $pattern, $body, $matches );
+
+		if ( false === $matched || 0 === $matched ) {
+			return $origins;
+		}
+
+		foreach ( $matches[1] as $host ) {
+			$origins[] = 'https://' . strtolower( $host );
+		}
+
+		return array_values( array_unique( array_filter( $origins ) ) );
+	}
+
+	/**
+	 * Determine whether the current export is running inside Static Studio.
+	 *
+	 * @param string $source_origin Fetched page origin.
+	 *
+	 * @return bool
+	 */
+	private function is_static_studio_export( $source_origin ) {
+		if ( defined( 'SSS_VERSION' ) || 'simply-static-studio' === $this->options->get( 'delivery_method' ) ) {
+			return true;
+		}
+
+		$candidates = array_merge( array( $source_origin ), Util::local_url_bases() );
+		foreach ( $candidates as $candidate ) {
+			$parts = function_exists( 'wp_parse_url' ) ? wp_parse_url( $candidate ) : parse_url( $candidate );
+			$host  = is_array( $parts ) && ! empty( $parts['host'] ) ? strtolower( (string) $parts['host'] ) : '';
+
+			if ( preg_match( '/^wp(?:-|\\.)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.(?:onstatic|static\\d*)\\.studio$/', $host ) ) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	/**
@@ -516,17 +606,17 @@ class Url_Extractor {
 	}
 
 	/**
-	 * Remove residual references to an unconfigured runtime/proxy origin.
+	 * Remove residual references to a runtime/proxy source origin.
 	 *
 	 * Structured URL extraction handles normal attributes. This final pass also
 	 * covers visible URL text, form values, nested query parameters, and encoded
 	 * URLs that otherwise leak a managed WordPress runtime into static output.
 	 *
-	 * @param string $source_origin Unconfigured source origin.
+	 * @param string $source_origin Source origin.
 	 *
 	 * @return void
 	 */
-	private function replace_unconfigured_source_origin_urls( $source_origin ) {
+	private function replace_source_origin_urls( $source_origin ) {
 		$response_body   = $this->get_body();
 		$destination_url = $this->options->get_destination_url();
 
@@ -2744,17 +2834,23 @@ class Url_Extractor {
 		if ( $url ) {
 			$url = Util::normalize_url( $url );
 			$url = $this->normalize_destination_asset_url( $url );
+			$url = $this->normalize_retired_source_url( $url );
 		}
 
 		if ( $url && Util::is_local_url( $url ) ) {
 			// Smart Crawl handles broad URL discovery, but directly referenced
-			// local assets must still be queued so mounted exports cannot miss
-			// critical CSS, JS, fonts, and images when a crawler is disabled or
-			// does not know about a runtime-generated asset URL.
-			if ( ! $this->options->get( 'smart_crawl' ) || Util::is_local_asset_url( $url ) ) {
+			// local assets and links explicitly selected by an Additional URLs
+			// regex must still be queued. Regex matches can represent virtual
+			// routes that WordPress object crawlers cannot enumerate.
+			$queue_url         = Util::remove_params_and_fragment( $url );
+			$should_follow_url = ! $this->options->get( 'smart_crawl' )
+				|| Util::is_local_asset_url( $url )
+				|| $this->matches_additional_url_regex( $queue_url );
+
+			if ( $should_follow_url ) {
 				$this->extracted_urls[] = apply_filters(
 					'simply_static_extracted_url',
-					Util::remove_params_and_fragment( $url ),
+					$queue_url,
 					$url,
 					$this->static_page
 				);
@@ -2764,6 +2860,97 @@ class Url_Extractor {
 		}
 
 		return $url;
+	}
+
+	/**
+	 * Determine whether a discovered URL matches an Additional URLs regex.
+	 *
+	 * The setup task can resolve regexes against known WordPress objects, but
+	 * runtime-generated rewrite endpoints only become known when linked from an
+	 * exported page. Cache the configured regexes for this extractor so those
+	 * links can opt back into following while Enhanced Crawl is enabled.
+	 *
+	 * @param string $url Absolute local URL.
+	 *
+	 * @return bool
+	 */
+	private function matches_additional_url_regex( $url ) {
+		if ( null === $this->additional_url_regexes ) {
+			$additional_urls = apply_filters( 'ss_setup_task_additional_urls', $this->options->get( 'additional_urls' ) );
+			$additional_urls = apply_filters( 'ss_additional_urls', Util::string_to_array( $additional_urls ) );
+			$patterns        = Util::parse_patterns( (array) $additional_urls );
+
+			$this->additional_url_regexes = (array) $patterns['regex'];
+		}
+
+		foreach ( $this->additional_url_regexes as $pattern ) {
+			if ( 1 === @preg_match( $pattern, $url ) ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Point a URL from a retired runtime alias at the hostname used to fetch the
+	 * current page. This keeps the exported public path unchanged while ensuring
+	 * the crawler does not try to download an asset from a decommissioned host.
+	 *
+	 * @param string $url Absolute URL.
+	 *
+	 * @return string
+	 */
+	private function normalize_retired_source_url( $url ) {
+		if ( ! is_string( $url ) || '' === $url || '' === $this->active_source_origin ) {
+			return $url;
+		}
+
+		$url_parts    = function_exists( 'wp_parse_url' ) ? wp_parse_url( $url ) : parse_url( $url );
+		$source_parts = function_exists( 'wp_parse_url' ) ? wp_parse_url( $this->active_source_origin ) : parse_url( $this->active_source_origin );
+
+		if (
+			! is_array( $url_parts )
+			|| ! is_array( $source_parts )
+			|| empty( $url_parts['host'] )
+			|| empty( $source_parts['host'] )
+			|| isset( $url_parts['user'] )
+			|| isset( $url_parts['pass'] )
+		) {
+			return $url;
+		}
+
+		$url_host    = strtolower( trim( (string) $url_parts['host'], '.' ) );
+		$source_host = strtolower( trim( (string) $source_parts['host'], '.' ) );
+		if ( $url_host === $source_host ) {
+			return $url;
+		}
+
+		$is_retired_source = false;
+		foreach ( $this->active_source_origins as $source_origin ) {
+			$parts = function_exists( 'wp_parse_url' ) ? wp_parse_url( $source_origin ) : parse_url( $source_origin );
+			if ( is_array( $parts ) && ! empty( $parts['host'] ) && 0 === strcasecmp( $url_host, trim( (string) $parts['host'], '.' ) ) ) {
+				$is_retired_source = true;
+				break;
+			}
+		}
+
+		if ( ! $is_retired_source ) {
+			return $url;
+		}
+
+		$canonical_url = $this->active_source_origin;
+		$canonical_url .= isset( $url_parts['path'] ) ? $url_parts['path'] : '/';
+
+		if ( ! empty( $url_parts['query'] ) ) {
+			$canonical_url .= '?' . $url_parts['query'];
+		}
+
+		if ( ! empty( $url_parts['fragment'] ) ) {
+			$canonical_url .= '#' . $url_parts['fragment'];
+		}
+
+		return $canonical_url;
 	}
 
 	/**

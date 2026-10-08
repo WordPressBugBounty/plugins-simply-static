@@ -4,7 +4,7 @@ Tags: jamstack, performance, security, static site generator
 Requires at least: 6.2
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag:  3.8.16
+Stable tag:  3.8.17
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -71,7 +71,7 @@ Perfect for developers self-hosting client sites, agencies managing infrastructu
 [Get Simply Static Pro](https://simplystatic.com/simply-static-pro/)
 
 = Simply Static Studio - For Businesses & Content Creators =
-$19/month per site
+$12/month per site
 All-in-one managed WordPress hosting. Zero maintenance. Maximum security.
 
 * Fully managed WordPress hosting
@@ -202,7 +202,7 @@ Simply Static Pro and Studio are optional premium products for advanced features
 = What's the difference between the free plugin, Pro, and Studio? =
 Free: Generate static sites, export as ZIP or to local directory. Perfect for testing and simple exports.
 Pro ($99/year per site): Advanced deployment, automation, forms, search, WP-CLI. For developers and agencies self-hosting.
-Studio ($19/month per site): All-in-one managed hosting. We handle WordPress, static hosting, backups, SSL, everything. For businesses who want zero maintenance.
+Studio ($12/month per site): All-in-one managed hosting. We handle WordPress, static hosting, backups, SSL, everything. For businesses who want zero maintenance.
 See detailed comparison
 = Can I use the free version for production sites? =
 Yes, but you'll need to manually upload the ZIP file to your hosting provider each time you update your site.
@@ -274,6 +274,12 @@ Settings - Configure your static site export options
 Diagnostics - Check your WordPress environment for compatibility
 
 == Changelog ==
+
+= 3.8.17 =
+
+* Added pagination discovery for yearly, monthly, and daily date archives
+* Fixed Additional URLs regex matches being skipped during Enhanced Crawl exports
+* Fixed retired Simply Static Studio origins remaining in migrated site exports
 
 = 3.8.16 =
 
