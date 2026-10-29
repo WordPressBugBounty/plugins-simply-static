@@ -748,6 +748,8 @@ class Admin_Rest {
 
         $options          = Options::reinstance();
         $last_export_end  = $options->get( 'archive_end_time' );
+        $status_messages  = $options->get( 'archive_status_messages' );
+        $last_export_failed = is_array( $status_messages ) && ! empty( $status_messages['error'] );
         $modified_count   = 0;
         $media_count      = 0;
         $deleted_count    = 0;
@@ -815,6 +817,7 @@ class Admin_Rest {
                 'modified_count' => $modified_count,
                 'media_count'    => $media_count,
                 'deleted_count'  => $deleted_count,
+                'last_export_failed' => $last_export_failed,
             ),
         ) );
     }
@@ -1021,6 +1024,7 @@ class Admin_Rest {
 			'generate_type',
 			'deploy_manifest_schema_version',
 			'zip_batch_offset',
+			'zip_batch_state',
 			'zip_total_files',
 			'zip_files',
 			'version',
@@ -1261,6 +1265,7 @@ class Admin_Rest {
 			'generate_type',
 			'archive_task_list',
 			'zip_batch_offset',
+			'zip_batch_state',
 			'zip_total_files',
 			'zip_files',
 			'version',
@@ -1495,6 +1500,7 @@ class Admin_Rest {
 				'generate_type'            => 'export',
 				'archive_task_list'        => array(),
 				'zip_batch_offset'         => null,
+				'zip_batch_state'          => null,
 				'zip_total_files'          => null,
 				'zip_files'                => null,
 			);
